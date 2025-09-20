@@ -44,9 +44,11 @@ http://example.com/page.php?id=1
 http://test.com/product.php?item=2
 ```
 ## Sample Output
+```bash
 [info] Testing URL: http://example.com/page.php?id=1
 [info] Testing Single-Quote on parameter 'id'...
 [detected] http://example.com/page.php?id=1 --> Single-Quote on 'id'
+```
 
 ## All Detected SQLi URLs:
 ```bash
