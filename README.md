@@ -24,4 +24,42 @@ Install `requests` if you don't have it:
 
 ```bash
 pip install requests
+```
+Usage
+1. Run the script
+```bash
+python sqli_tester.py
+```
+2. Choose an option
 
+1. Single URL: manually enter a single URL
+
+2. Multi URL: read URLs from a file named urls.txt in the same folder
+
+3. Format for urls.txt:
+
+Each URL on a separate line:
+```bash
+http://example.com/page.php?id=1
+http://test.com/product.php?item=2
+```
+Sample Output
+[info] Testing URL: http://example.com/page.php?id=1
+[info] Testing Single-Quote on parameter 'id'...
+[detected] http://example.com/page.php?id=1 --> Single-Quote on 'id'
+
+All Detected SQLi URLs:
+```bash
+http://example.com/page.php?id=1 --> Single-Quote on 'id'
+```
+Important Notes
+
+This tool only tests GET parameters.
+
+Use only on your own sites or with permission.
+
+[error] is shown only when the URL has no query parameters.
+
+License
+
+MIT License
