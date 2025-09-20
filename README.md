@@ -25,7 +25,7 @@ Install `requests` if you don't have it:
 ```bash
 pip install requests
 ```
-Usage
+## Usage
 1. Run the script
 ```bash
 python sqli_tester.py
@@ -38,21 +38,21 @@ python sqli_tester.py
 
 3. Format for urls.txt:
 
-Each URL on a separate line:
+## Each URL on a separate line:
 ```bash
 http://example.com/page.php?id=1
 http://test.com/product.php?item=2
 ```
-Sample Output
+## Sample Output
 [info] Testing URL: http://example.com/page.php?id=1
 [info] Testing Single-Quote on parameter 'id'...
 [detected] http://example.com/page.php?id=1 --> Single-Quote on 'id'
 
-All Detected SQLi URLs:
+## All Detected SQLi URLs:
 ```bash
 http://example.com/page.php?id=1 --> Single-Quote on 'id'
 ```
-Important Notes
+## Important Notes
 
 This tool only tests GET parameters.
 
@@ -60,6 +60,6 @@ Use only on your own sites or with permission.
 
 [error] is shown only when the URL has no query parameters.
 
-License
+## License
 
 MIT License
