@@ -28,7 +28,7 @@ pip install requests
 ## Usage
 1. Run the script
 ```bash
-python sqli_tester.py
+python Fast-SQLi.py
 ```
 2. Choose an option
 
