@@ -6,6 +6,7 @@ This tool is a detector, not an exploitation tool. Its job is to find potentiall
 
 ^ Example of the generated HTML report
 
+![Untitled design (1)](https://github.com/user-attachments/assets/59f17aec-aef5-4ea8-8e2b-6a864751e15d)
 
 
 ## ✨ Key Features
