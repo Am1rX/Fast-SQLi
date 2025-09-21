@@ -1,8 +1,8 @@
 # FastSQLi: A Smart and Rapid SQL Injection Vulnerability Scanner
 
-FastSQLi is a high-speed, multithreaded SQL Injection vulnerability scanner written in Python. It is designed to quickly scan a large number of URLs and identify potential SQLi vulnerabilities without the complexity of traditional tools. Its primary focus is on detection, providing clear and actionable reports to help security professionals and developers secure their applications.
+**FastSQLi** is a high-speed, multithreaded SQL Injection vulnerability scanner written in Python. It is designed to quickly scan a large number of URLs and identify potential SQLi vulnerabilities without the complexity of traditional tools. Its primary focus is on detection, providing clear and actionable reports to help security professionals and developers secure their applications.
 
-This tool is a detector, not an exploitation tool. Its job is to find potentially vulnerable entry points; how you use that information is up to your skills and professional responsibility.
+***This tool is a detector***, not an **exploitation tool**. Its job is to find potentially vulnerable entry points; how you use that information is up to your skills and professional responsibility.
 
 ^ Example of the generated HTML report
 
@@ -28,9 +28,7 @@ This tool is intended for educational purposes and authorized security testing o
 
 ### Requirements & Installation
 Python 3.x
-```
-requests library
-```
+
 Clone the repository:
 ```
 git clone [https://github.com/Am1rX/Fast-SQLi.git](https://github.com/Am1rX/Fast-SQLi.git)
@@ -50,11 +48,11 @@ For scanning multiple URLs, create a file named urls.txt in the root directory. 
 
 ### Run the script:
 ```
-python3 FastSQLi.py
+python3 Fast-SQLi.py
 ```
 ### Follow the on-screen prompts:
 
-Choose between scanning a single URL or multiple URLs from urls.txt.
+Choose between scanning a single URL or multiple URLs from the urls.txt file.
 
 Decide whether to verify SSL certificates (recommended).
 
@@ -76,7 +74,7 @@ Sample Output in Terminal
 ```
 
 ## Contributing
-FastSQLi is an open-source project, and contributions are welcome! If you have an idea for a new feature, find a bug, or want to improve the code, please feel free to open an Issue or submit a Pull Request.
+**FastSQLi** is an open-source project, and contributions are welcome! If you have an idea for a new feature, find a bug, or want to improve the code, please feel free to open an Issue or submit a Pull Request.
 
 ## License
 This project is licensed under the MIT License. See the LICENSE file for details.
