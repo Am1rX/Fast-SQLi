@@ -26,7 +26,7 @@ This tool is a detector, not an exploitation tool. Its job is to find potentiall
 ## ⚠️ Ethical Warning & Disclaimer
 This tool is intended for educational purposes and authorized security testing only. Using FastSQLi to scan systems for which you do not have explicit, legal permission is illegal and unethical. The author is not responsible for any misuse or damage caused by this program.
 
-## Requirements & Installation
+### Requirements & Installation
 Python 3.x
 ```
 requests library
@@ -48,7 +48,7 @@ For scanning multiple URLs, create a file named urls.txt in the root directory. 
 [http://example.com/page.php?id=1](http://example.com/page.php?id=1)
 [http://test.com/product.php?cat=2&item=5](http://test.com/product.php?cat=2&item=5)
 
-## Run the script:
+### Run the script:
 ```
 python3 FastSQLi.py
 ```
