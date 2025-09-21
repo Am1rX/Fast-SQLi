@@ -1,67 +1,89 @@
-# Fast-SQLi
+## FastSQLi: A Smart and Rapid SQL Injection Vulnerability Scanner
 
-This Python script allows you to test SQL Injection (SQLi) vulnerabilities on URL parameters.
+FastSQLi is a high-speed, multithreaded SQL Injection vulnerability scanner written in Python. It is designed to quickly scan a large number of URLs and identify potential SQLi vulnerabilities without the complexity of traditional tools. Its primary focus is on detection, providing clear and actionable reports to help security professionals and developers secure their applications.
 
----
+This tool is a detector, not an exploitation tool. Its job is to find potentially vulnerable entry points; how you use that information is up to your skills and professional responsibility.
 
-## Features
+^ Example of the generated HTML report
 
-- Test **multiple URLs simultaneously** using 10 threads for faster scanning
-- `[info]` messages for tracking the progress of each URL
-- `[detected]` messages when a vulnerability is found
-- Final list of all vulnerable URLs including the parameter name and method used
-- Automatically tests the **last parameter** of the URL even if there are multiple parameters
-- ANSI color-coded output for better readability (`[info]`, `[error]`, `[detected]`)
+## ✨ Key Features
 
----
+High-Speed Scanning: Utilizes multithreading to test multiple URLs simultaneously, drastically reducing scan time.
 
-## Requirements
+Multiple Detection Techniques: Employs a variety of methods to identify vulnerabilities:
 
-- Python 3.x
-- Standard Python modules: `requests`
+Error-Based: Detects common database error messages.
 
-Install `requests` if you don't have it:
+Boolean-Based: Compares content differences between TRUE and FALSE conditions.
 
-```bash
-pip install requests
+Time-Based: Identifies blind vulnerabilities by measuring response delays.
+
+Aggressive Mode (Optional): Allows for more intensive UNION-Based and Stacked Query tests for deeper analysis.
+
+Comprehensive Reporting: Generates three types of reports for clear analysis:
+
+Interactive HTML Report (sqli_report.html): A clean, user-friendly report for easy visualization and sharing.
+
+CSV Report (sqli_findings.csv): A structured data file, perfect for importing into other tools.
+
+Per-URL Detailed Logs: Creates individual log files for every target URL in the /logs directory for in-depth debugging.
+
+User-Friendly Interface: A simple command-line prompt to guide you through scan options.
+
+## ⚠️ Ethical Warning & Disclaimer
+This tool is intended for educational purposes and authorized security testing only. Using FastSQLi to scan systems for which you do not have explicit, legal permission is illegal and unethical. The author is not responsible for any misuse or damage caused by this program.
+
+## Requirements & Installation
+Python 3.x
 ```
-## Usage
-1. Run the script
-```bash
-python Fast-SQLi.py
+requests library
 ```
-2. Choose an option
-
-1. Single URL: manually enter a single URL
-
-2. Multi URL: read URLs from a file named urls.txt in the same folder
-
-3. Format for urls.txt:
-
-## Each URL on a separate line:
-```bash
-http://example.com/page.php?id=1
-http://test.com/product.php?item=2
+Clone the repository:
 ```
-## Sample Output
-```bash
-[info] Testing URL: http://example.com/page.php?id=1
-[info] Testing Single-Quote on parameter 'id'...
-[detected] http://example.com/page.php?id=1 --> Single-Quote on 'id'
+git clone [https://github.com/Am1rX/Fast-SQLi.git](https://github.com/Am1rX/Fast-SQLi.git)
+cd Fast-SQLi
+```
+Install dependencies:
+```
+pip install -r requirements.txt
+```
+## 🚀 Usage
+Prepare your targets:
+
+For scanning multiple URLs, create a file named urls.txt in the root directory. Add one URL per line.
+
+[http://example.com/page.php?id=1](http://example.com/page.php?id=1)
+[http://test.com/product.php?cat=2&item=5](http://test.com/product.php?cat=2&item=5)
+
+## Run the script:
+```
+python3 sqli_tester_report.py
+```
+Follow the on-screen prompts:
+
+Choose between scanning a single URL or multiple URLs from urls.txt.
+
+Decide whether to verify SSL certificates (recommended).
+
+Choose whether to enable the aggressive scanning mode.
+
+The scan will begin, showing live progress. Once complete, all reports will be available in the project directory.
+```
+Sample Output in Terminal
+[info] Starting scan with 10 threads...
+[info] Testing [http://testphp.vulnweb.com/listproducts.php?cat=1](http://testphp.vulnweb.com/listproducts.php?cat=1)
+[info] target -> [http://testphp.vulnweb.com/listproducts.php?cat=1](http://testphp.vulnweb.com/listproducts.php?cat=1) [188.40.75.132]
+[info] Testing parameter 'cat'
+[info] Basic single_quote on 'cat'
+[detected] Immediate: [http://testphp.vulnweb.com/listproducts.php?cat=1](http://testphp.vulnweb.com/listproducts.php?cat=1) --> basic-single_quote-diff on 'cat' (content sim=0.9123)
+...
+[info] Scan finished.
+[info] CSV report saved to sqli_findings.csv
+[info] HTML report saved to sqli_report.html
 ```
 
-## All Detected SQLi URLs:
-```bash
-http://example.com/page.php?id=1 --> Single-Quote on 'id'
-```
-## Important Notes
-
-This tool only tests GET parameters.
-
-Use only on your own sites or with permission.
-
-[error] is shown only when the URL has no query parameters.
+## Contributing
+FastSQLi is an open-source project and contributions are welcome! If you have an idea for a new feature, find a bug, or want to improve the code, please feel free to open an Issue or submit a Pull Request.
 
 ## License
-
-MIT License
+This project is licensed under the MIT License. See the LICENSE file for details.
