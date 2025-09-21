@@ -31,7 +31,7 @@ Python 3.x
 
 Clone the repository:
 ```
-git clone [https://github.com/Am1rX/Fast-SQLi.git](https://github.com/Am1rX/Fast-SQLi.git)
+git clone https://github.com/Am1rX/Fast-SQLi.git
 cd Fast-SQLi
 ```
 Install dependencies:
@@ -62,11 +62,11 @@ The scan will begin, showing live progress. Once complete, all reports will be a
 ```
 Sample Output in Terminal
 [info] Starting scan with 10 threads...
-[info] Testing [http://testphp.vulnweb.com/listproducts.php?cat=1](http://testphp.vulnweb.com/listproducts.php?cat=1)
-[info] target -> [http://testphp.vulnweb.com/listproducts.php?cat=1](http://testphp.vulnweb.com/listproducts.php?cat=1) [188.40.75.132]
+[info] Testing http://testphp.vulnweb.com/listproducts.php?cat=1
+[info] target -> http://testphp.vulnweb.com/listproducts.php?cat=1
 [info] Testing parameter 'cat'
 [info] Basic single_quote on 'cat'
-[detected] Immediate: [http://testphp.vulnweb.com/listproducts.php?cat=1](http://testphp.vulnweb.com/listproducts.php?cat=1) --> basic-single_quote-diff on 'cat' (content sim=0.9123)
+[detected] Immediate: http://testphp.vulnweb.com/listproducts.php?cat=1 --> basic-single_quote-diff on 'cat' (content sim=0.9123)
 ...
 [info] Scan finished.
 [info] CSV report saved to sqli_findings.csv
