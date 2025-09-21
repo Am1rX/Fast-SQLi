@@ -5,7 +5,7 @@ FastSQLi is a high-speed, multithreaded SQL Injection vulnerability scanner writ
 This tool is a detector, not an exploitation tool. Its job is to find potentially vulnerable entry points; how you use that information is up to your skills and professional responsibility.
 
 ^ Example of the generated HTML report
-<img width="1898" height="865" alt="Untitled design" src="https://github.com/user-attachments/assets/b456a5e4-3d0a-4d9c-906f-3ad002a08fba" />
+
 
 
 ## ✨ Key Features
