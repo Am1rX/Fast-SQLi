@@ -1,16 +1,5 @@
-#!/usr/bin/env python3
-"""
-sqli_tester_report.py
-Advanced multi-parameter SQLi pre-scanner with threaded URL scanning + CSV/HTML reporting.
 
-- Scans URLs (from single input or urls.txt) using a ThreadPoolExecutor (default 10 threads).
-- Tests all GET parameters for multiple techniques (basic diffs, boolean, error, time).
-- Prints logs live, stores plain-text logs internally and writes them to sqli_run.log.
-- Produces sqli_findings.csv and sqli_report.html with summary, findings table and full logs.
-
-USAGE: python sqli_tester_report.py
-IMPORTANT: Run only against systems you own or have permission to test.
-"""
+# IMPORTANT: Run only against systems you own or have permission to test.
 
 import requests
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
@@ -494,3 +483,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
