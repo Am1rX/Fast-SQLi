@@ -59,7 +59,7 @@ For scanning multiple URLs, create a file named urls.txt in the root directory. 
 
 ## Run the script:
 ```
-python3 sqli_tester_report.py
+python3 FastSQLi.py
 ```
 Follow the on-screen prompts:
 
@@ -85,7 +85,7 @@ Sample Output in Terminal
 ```
 
 ## Contributing
-FastSQLi is an open-source project and contributions are welcome! If you have an idea for a new feature, find a bug, or want to improve the code, please feel free to open an Issue or submit a Pull Request.
+FastSQLi is an open-source project, and contributions are welcome! If you have an idea for a new feature, find a bug, or want to improve the code, please feel free to open an Issue or submit a Pull Request.
 
 ## License
 This project is licensed under the MIT License. See the LICENSE file for details.
