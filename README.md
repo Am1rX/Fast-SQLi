@@ -44,6 +44,7 @@ Prepare your targets:
 For scanning multiple URLs, create a file named urls.txt in the root directory. Add one URL per line.
 
 [http://example.com/page.php?id=1](http://example.com/page.php?id=1)
+
 [http://test.com/product.php?cat=2&item=5](http://test.com/product.php?cat=2&item=5)
 
 ### Run the script:
