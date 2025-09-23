@@ -1,4 +1,3 @@
-
 # IMPORTANT: Run only against systems you own or have permission to test.
 
 import requests
@@ -25,7 +24,7 @@ RESET = "\033[0m"
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                   'AppleWebKit/537.36 (KHTML, like Gecko) '
-                  'Chrome/140.0.0.0 Safari/537.36 SQLiTest/2.1'
+                  'Chrome/140.0.0.0 Safari/537.36 SQLiTest/2.2'
 }
 TIMEOUT = 12  # seconds for requests
 THREADS = 10
@@ -34,9 +33,11 @@ THREADS = 10
 AGGRESSIVE = False
 
 # thresholds
-DIFF_THRESHOLD = 0.98         # similarity ratio above this => considered same
+DIFF_THRESHOLD = 0.95         # similarity ratio above this => considered same (lowered to reduce FPs)
+BOOLEAN_SIM_THRESHOLD = 0.98  # if true/false responses are very similar -> likely no boolean effect
 TIME_SLEEP_THRESHOLD = 4.0    # seconds extra considered as time-based injection
-BOOLEAN_SIM_THRESHOLD = 0.99  # if true/false responses are very similar -> likely no boolean effect
+VERIFY_TIME_SLEEP_DELAY = 3   # seconds for the verification time-based request (must be less than payload's sleep)
+
 
 print_lock = threading.Lock()
 detected_lock = threading.Lock()
@@ -106,7 +107,7 @@ def build_url_from_parts(parsed, params):
     new = (parsed.scheme, parsed.netloc, parsed.path, parsed.params, query, parsed.fragment)
     return urlunparse(new)
 
-# payload sets (non-destructive)
+# payload sets
 BASIC_PAYLOADS = {
     "single_quote": ("'", "append single quote"),
     "double_quote": ('"', "append double quote"),
@@ -169,58 +170,14 @@ def test_parameter(parsed_url, original_params, param_name, original_url, verify
     base_status = base_resp.get("status")
     base_headers = base_resp.get("headers", {})
     base_elapsed = base_resp.get("elapsed", 0.0)
+    
+    original_value = original_params.get(param_name, [""])[0]
 
-    # 1) BASIC payloads
-    for name, (pl, desc) in BASIC_PAYLOADS.items():
-        safe_print(f"{YELLOW}[info] Basic payload {name} on '{param_name}'...{RESET}")
-        new_params = {k: list(v) for k, v in original_params.items()}
-        new_params[param_name] = [make_payload_variants(original_params[param_name][0], pl)]
-        new_url = build_url_from_parts(parsed_url, new_params)
-        r = send_request(new_url, verify_ssl=verify_ssl)
-        if "error" in r:
-            safe_print(f"{RED}[error] Request failed for basic payload {name}: {r['error']}{RESET}")
-            continue
-
-        if r.get("status") != base_status:
-            evidence = f"status change: {base_status} -> {r.get('status')}"
-            safe_print(f"{GREEN}[detected] {original_url} --> basic-{name} on '{param_name}' ({evidence}){RESET}")
-            detected.append((param_name, f"basic-{name}-status", evidence))
-        elif r.get("headers", {}).get("Location") and base_headers.get("Location") != r.get("headers", {}).get("Location"):
-            evidence = f"redirect Location changed"
-            safe_print(f"{GREEN}[detected] {original_url} --> basic-{name} on '{param_name}' ({evidence}){RESET}")
-            detected.append((param_name, f"basic-{name}-redirect", evidence))
-        else:
-            diff_flag, sim = detect_via_diff(base_text, r.get("content", ""))
-            if diff_flag:
-                evidence = f"content similarity {sim:.4f}"
-                safe_print(f"{GREEN}[detected] {original_url} --> basic-{name} on '{param_name}' ({evidence}){RESET}")
-                detected.append((param_name, f"basic-{name}-diff", evidence))
-
-    # 2) BOOLEAN-based
-    for bp_name, true_payload, false_payload in BOOLEAN_PAYLOADS:
-        safe_print(f"{YELLOW}[info] Boolean test {bp_name} on '{param_name}'...{RESET}")
-        p_true = {k: list(v) for k, v in original_params.items()}
-        p_false = {k: list(v) for k, v in original_params.items()}
-        p_true[param_name] = [make_payload_variants(original_params[param_name][0], true_payload)]
-        p_false[param_name] = [make_payload_variants(original_params[param_name][0], false_payload)]
-        url_true = build_url_from_parts(parsed_url, p_true)
-        url_false = build_url_from_parts(parsed_url, p_false)
-        r_true = send_request(url_true, verify_ssl=verify_ssl)
-        r_false = send_request(url_false, verify_ssl=verify_ssl)
-        if "error" in r_true or "error" in r_false:
-            safe_print(f"{RED}[error] Boolean request failed: {r_true.get('error')} / {r_false.get('error')}{RESET}")
-            continue
-        sim_tf = similarity(r_true.get("content", ""), r_false.get("content", ""))
-        if sim_tf < BOOLEAN_SIM_THRESHOLD:
-            evidence = f"boolean diff sim={sim_tf:.4f}"
-            safe_print(f"{GREEN}[detected] {original_url} --> boolean {bp_name} on '{param_name}' ({evidence}){RESET}")
-            detected.append((param_name, f"boolean-{bp_name}", evidence))
-
-    # 3) ERROR-based
+    # 1) ERROR-based (Usually high confidence)
     for err_pl in ERROR_PAYLOADS:
         safe_print(f"{YELLOW}[info] Error-inducing payload on '{param_name}'...{RESET}")
         params_e = {k: list(v) for k, v in original_params.items()}
-        params_e[param_name] = [make_payload_variants(original_params[param_name][0], err_pl)]
+        params_e[param_name] = [make_payload_variants(original_value, err_pl)]
         url_e = build_url_from_parts(parsed_url, params_e)
         r_e = send_request(url_e, verify_ssl=verify_ssl)
         if "error" in r_e:
@@ -232,30 +189,82 @@ def test_parameter(parsed_url, original_params, param_name, original_url, verify
             safe_print(f"{GREEN}[detected] {original_url} --> error-based on '{param_name}' ({evidence}){RESET}")
             detected.append((param_name, "error-based", evidence))
 
-    # 4) TIME-based
+    # 2) BOOLEAN-based (IMPROVED LOGIC)
+    for bp_name, true_payload, false_payload in BOOLEAN_PAYLOADS:
+        safe_print(f"{YELLOW}[info] Boolean test {bp_name} on '{param_name}'...{RESET}")
+        p_true = {k: list(v) for k, v in original_params.items()}
+        p_false = {k: list(v) for k, v in original_params.items()}
+        p_true[param_name] = [make_payload_variants(original_value, true_payload)]
+        p_false[param_name] = [make_payload_variants(original_value, false_payload)]
+        url_true = build_url_from_parts(parsed_url, p_true)
+        url_false = build_url_from_parts(parsed_url, p_false)
+        r_true = send_request(url_true, verify_ssl=verify_ssl)
+        r_false = send_request(url_false, verify_ssl=verify_ssl)
+        if "error" in r_true or "error" in r_false:
+            safe_print(f"{RED}[error] Boolean request failed: {r_true.get('error')} / {r_false.get('error')}{RESET}")
+            continue
+        
+        content_true = r_true.get("content", "")
+        content_false = r_false.get("content", "")
+
+        sim_base_true = similarity(base_text, content_true)
+        sim_base_false = similarity(base_text, content_false)
+        sim_true_false = similarity(content_true, content_false)
+
+        # Vulnerable if:
+        # 1. Base response is SIMILAR to TRUE response.
+        # 2. Base response is DIFFERENT from FALSE response.
+        # 3. TRUE and FALSE responses are DIFFERENT from each other.
+        if (sim_base_true > BOOLEAN_SIM_THRESHOLD and
+            sim_base_false < BOOLEAN_SIM_THRESHOLD and
+            sim_true_false < BOOLEAN_SIM_THRESHOLD):
+            
+            evidence = f"boolean logic confirmed: base/true_sim={sim_base_true:.2f}, base/false_sim={sim_base_false:.2f}"
+            safe_print(f"{GREEN}[detected] {original_url} --> boolean {bp_name} on '{param_name}' ({evidence}){RESET}")
+            detected.append((param_name, f"boolean-{bp_name}", evidence))
+
+    # 3) TIME-based (IMPROVED LOGIC WITH VERIFICATION)
     for tname, tpayload, tdelay in TIME_PAYLOADS:
         safe_print(f"{YELLOW}[info] Time-based test {tname} on '{param_name}' (expect ~{tdelay}s)...{RESET}")
         params_t = {k: list(v) for k, v in original_params.items()}
-        params_t[param_name] = [make_payload_variants(original_params[param_name][0], tpayload)]
+        params_t[param_name] = [make_payload_variants(original_value, tpayload)]
         url_t = build_url_from_parts(parsed_url, params_t)
-        t_start = time.time()
+        
         r_t = send_request(url_t, verify_ssl=verify_ssl)
-        t_elapsed = time.time() - t_start
         if "error" in r_t:
             safe_print(f"{RED}[error] Time payload request failed: {r_t['error']}{RESET}")
             continue
-        delta = t_elapsed - base_elapsed
-        if delta >= TIME_SLEEP_THRESHOLD:
-            evidence = f"time delta {delta:.2f}s (payload {tname})"
-            safe_print(f"{GREEN}[detected] {original_url} --> time-based {tname} on '{param_name}' ({evidence}){RESET}")
-            detected.append((param_name, f"time-{tname}", evidence))
+        
+        delta = r_t.get("elapsed", 0.0) - base_elapsed
 
-    # 5) UNION-based (AGGRESSIVE)
+        if delta >= TIME_SLEEP_THRESHOLD:
+            safe_print(f"{YELLOW}[info] Initial delay detected ({delta:.2f}s). Verifying...{RESET}")
+            
+            # Send verification request with a shorter delay
+            verify_payload = tpayload.replace(f"({tdelay})", f"({VERIFY_TIME_SLEEP_DELAY})")
+            verify_payload = verify_payload.replace(f"'{tdelay}'", f"'{VERIFY_TIME_SLEEP_DELAY}'") # for mssql
+            
+            params_v = {k: list(v) for k, v in original_params.items()}
+            params_v[param_name] = [make_payload_variants(original_value, verify_payload)]
+            url_v = build_url_from_parts(parsed_url, params_v)
+            
+            r_v = send_request(url_v, verify_ssl=verify_ssl)
+            delta_v = r_v.get("elapsed", 0.0) - base_elapsed
+
+            if delta_v >= (VERIFY_TIME_SLEEP_DELAY - 1):  # Allow for a 1s margin of error
+                evidence = f"time delay confirmed. Initial: {delta:.2f}s, Verification: {delta_v:.2f}s"
+                safe_print(f"{GREEN}[detected] {original_url} --> time-based {tname} on '{param_name}' ({evidence}){RESET}")
+                detected.append((param_name, f"time-{tname}", evidence))
+            else:
+                safe_print(f"{YELLOW}[info] Time-based false positive suspected. Verification failed (delay: {delta_v:.2f}s).{RESET}")
+
+    # 4) AGGRESSIVE modes (UNION/STACKED)
     if AGGRESSIVE:
+        # UNION-based
         for uname, upayload in UNION_PAYLOADS:
             safe_print(f"{YELLOW}[info] UNION attempt {uname} on '{param_name}'...{RESET}")
             params_u = {k: list(v) for k, v in original_params.items()}
-            params_u[param_name] = [make_payload_variants(original_params[param_name][0], upayload)]
+            params_u[param_name] = [make_payload_variants(original_value, upayload)]
             url_u = build_url_from_parts(parsed_url, params_u)
             r_u = send_request(url_u, verify_ssl=verify_ssl)
             if "error" in r_u:
@@ -265,19 +274,12 @@ def test_parameter(parsed_url, original_params, param_name, original_url, verify
                 evidence = f"marker '{UNION_MARKER}' found"
                 safe_print(f"{GREEN}[detected] {original_url} --> union {uname} on '{param_name}' ({evidence}){RESET}")
                 detected.append((param_name, f"union-{uname}", evidence))
-            else:
-                diff_flag, sim = detect_via_diff(base_text, r_u.get("content", ""))
-                if diff_flag:
-                    evidence = f"union diff sim={sim:.4f}"
-                    safe_print(f"{GREEN}[detected] {original_url} --> union-diff {uname} on '{param_name}' ({evidence}){RESET}")
-                    detected.append((param_name, f"union-{uname}-diff", evidence))
-
-    # 6) STACKED (AGGRESSIVE)
-    if AGGRESSIVE:
+        
+        # STACKED
         for sname, spayload in STACKED_PAYLOADS:
             safe_print(f"{YELLOW}[info] Stacked attempt {sname} on '{param_name}'...{RESET}")
             params_s = {k: list(v) for k, v in original_params.items()}
-            params_s[param_name] = [make_payload_variants(original_params[param_name][0], spayload)]
+            params_s[param_name] = [make_payload_variants(original_value, spayload)]
             url_s = build_url_from_parts(parsed_url, params_s)
             r_s = send_request(url_s, verify_ssl=verify_ssl)
             if "error" in r_s:
@@ -292,24 +294,27 @@ def test_parameter(parsed_url, original_params, param_name, original_url, verify
     return detected
 
 def test_sqli_url(original_url, verify_ssl=True):
-    parsed = urlparse(original_url)
-    original_params = parse_qs(parsed.query)
+    try:
+        parsed = urlparse(original_url)
+        original_params = parse_qs(parsed.query)
+    except Exception as e:
+        safe_print(f"{RED}[error] Could not parse URL {original_url}: {e}{RESET}")
+        return
 
     safe_print(f"{WHITE}[info] Testing URL: {original_url}{RESET}")
 
     if not original_params:
-        safe_print(f"{RED}[error] URL has no query parameters: {original_url}{RESET}")
+        safe_print(f"{YELLOW}[info] URL has no query parameters: {original_url}{RESET}")
         return
 
     try:
         ip = socket.gethostbyname(parsed.netloc)
+        safe_print(f"{WHITE}[info] target -> {parsed.netloc} [{ip}]{RESET}")
     except socket.gaierror:
-        ip = "Unknown IP"
-    safe_print(f"{WHITE}[info] target -> {original_url} [{ip}]{RESET}")
+        safe_print(f"{RED}[error] Could not resolve hostname: {parsed.netloc}{RESET}")
+        return
 
     url_detected = []
-
-    # iterate over all parameters (serially per URL)
     for param in list(original_params.keys()):
         try:
             det = test_parameter(parsed, original_params, param, original_url, verify_ssl=verify_ssl)
@@ -317,15 +322,12 @@ def test_sqli_url(original_url, verify_ssl=True):
                 for (pname, method, evidence) in det:
                     with detected_lock:
                         all_detected.append((original_url, pname, method, evidence))
-                        url_detected.append((pname, method, evidence))
+                    url_detected.append((pname, method, evidence))
         except Exception as exc:
             safe_print(f"{RED}[error] Exception while testing param {param} on {original_url}: {exc}{RESET}")
 
     if not url_detected:
         safe_print(f"{YELLOW}[info] No detections for URL: {original_url}{RESET}")
-    else:
-        for (pname, method, evidence) in url_detected:
-            safe_print(f"{GREEN}[detected] Immediate: {original_url} --> {method} on '{pname}' ({evidence}){RESET}")
 
 def generate_csv(filename="sqli_findings.csv"):
     if not all_detected:
@@ -343,12 +345,10 @@ def generate_csv(filename="sqli_findings.csv"):
 def generate_html_report(filename="sqli_report.html", run_time_seconds=0, total_urls=0):
     now = time.strftime("%Y-%m-%d %H:%M:%S")
     findings_count = len(all_detected)
-    # aggregate counts by method
     method_counts = {}
     for (_, _, method, _) in all_detected:
         method_counts[method] = method_counts.get(method, 0) + 1
 
-    # build HTML
     rows_html = ""
     for (url, param, method, evidence) in all_detected:
         rows_html += "<tr>"
@@ -357,8 +357,6 @@ def generate_html_report(filename="sqli_report.html", run_time_seconds=0, total_
         rows_html += f"<td>{html.escape(method)}</td>"
         rows_html += f"<td>{html.escape(evidence)}</td>"
         rows_html += "</tr>\n"
-
-    log_text = "\n".join(html.escape(line) for line in log_entries)
 
     html_content = f"""<!doctype html>
     <html lang="en">
@@ -373,7 +371,6 @@ def generate_html_report(filename="sqli_report.html", run_time_seconds=0, total_
     th,td{{padding:10px;border:1px solid #ddd;text-align:left;font-size:14px;word-break:break-all;}}
     th{{background:#222;color:#fff}}
     .summary{{margin:20px 0;padding:15px;background:#fafafa;border:1px solid #eee;border-radius:6px}}
-    .logbox{{white-space:pre-wrap;background:#111;color:#eee;padding:15px;border-radius:6px;max-height:400px;overflow-y:auto;font-family:monospace;font-size:13px;}}
     .badge{{display:inline-block;padding:4px 10px;border-radius:6px;background:#eee;margin:0 5px 5px 0;font-size:12px;}}
     .github-link-top{{position:fixed;top:15px;right:20px;text-decoration:none;font-weight:bold;color:#444;background:#fff;padding:6px 12px;border-radius:5px;box-shadow:0 2px 8px rgba(0,0,0,0.1);border:1px solid #ddd;}}
     .github-link-top:hover{{background:#f5f5f5;}}
@@ -396,15 +393,12 @@ def generate_html_report(filename="sqli_report.html", run_time_seconds=0, total_
     {" ".join(f'<span class="badge">{html.escape(k)}: {v}</span>' for k,v in method_counts.items()) if method_counts else "N/A"}
     </p>
     </div>
-
     <h2>Findings</h2>
     {('<table><thead><tr><th>URL</th><th>Parameter</th><th>Method</th><th>Evidence</th></tr></thead><tbody>' + rows_html + '</tbody></table>') if rows_html else "<p>No vulnerabilities were found.</p>"}
-
     <div class="footer">
         <p><strong>Disclaimer:</strong> This tool is intended for educational purposes and authorized security testing only. Using this tool on systems without explicit permission from the owner is illegal. The developers assume no liability and are not responsible for any misuse or damage caused by this program.</p>
         <p><strong>Fast-SQLi</strong> | Source: <a href="https://github.com/Am1rX/Fast-SQLi" target="_blank">github.com/Am1rX/Fast-SQLi</a></p>
     </div>
-
     </div>
     </body>
     </html>
@@ -431,6 +425,7 @@ def main():
     safe_print("2. Multi URL from urls.txt")
     choice = input("Enter choice (1 or 2): ").strip()
 
+    urls = []
     if choice == "1":
         urls = [input("Enter the URL (e.g., http://example.com/page.php?id=1): ").strip()]
     elif choice == "2":
@@ -443,14 +438,14 @@ def main():
         safe_print(f"{RED}[error] Invalid choice.{RESET}")
         sys.exit(1)
 
-    # optional: SSL verify toggle
     verify_ssl = True
     ans = input("Verify SSL certificates? (Y/n) [default Y]: ").strip().lower()
     if ans == "n":
         verify_ssl = False
-        safe_print(f"{YELLOW}[info] SSL verification disabled. Be careful!{RESET}")
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        safe_print(f"{YELLOW}[warn] SSL verification disabled. Be careful!{RESET}")
 
-    # optional: aggressive mode toggle
     global AGGRESSIVE
     ans2 = input("Enable aggressive tests (UNION/STACKED)? (y/N) [default N]: ").strip().lower()
     if ans2 == "y":
@@ -463,7 +458,6 @@ def main():
     start_time = time.time()
 
     with ThreadPoolExecutor(max_workers=THREADS) as executor:
-        # map URLs to threads (each URL's params tested serially inside)
         executor.map(lambda u: test_sqli_url(u, verify_ssl=verify_ssl), urls)
 
     duration = time.time() - start_time
@@ -476,11 +470,10 @@ def main():
     else:
         safe_print(f"{YELLOW}No SQLi findings.{RESET}")
 
-    # save outputs
+    safe_print("=" * 60)
     generate_csv("sqli_findings.csv")
     generate_html_report("sqli_report.html", run_time_seconds=duration, total_urls=len(urls))
     save_plain_log("sqli_run.log")
 
 if __name__ == "__main__":
     main()
-
