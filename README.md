@@ -1,4 +1,6 @@
 # FastSQLi: A Smart and Rapid SQL Injection Vulnerability Scanner
+![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 **FastSQLi** is a high-speed, multithreaded SQL Injection vulnerability scanner written in Python. It is designed to quickly scan a large number of URLs and identify potential SQLi vulnerabilities without the complexity of traditional tools. Its primary focus is on detection, providing clear and actionable reports to help security professionals and developers secure their applications.
 
