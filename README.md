@@ -55,11 +55,9 @@ python3 Fast-SQLi.py
 ```
 ### Follow the on-screen prompts:
 
-Choose between scanning a single URL or multiple URLs from the urls.txt file.
-
-Decide whether to verify SSL certificates (recommended).
-
-Choose whether to enable the aggressive scanning mode.
+- Choose between scanning a single URL or multiple URLs from the urls.txt file.
+- Decide whether to verify SSL certificates (recommended).
+- Choose whether to enable the aggressive scanning mode.
 
 The scan will begin, showing live progress. Once complete, all reports will be available in the project directory.
 ```
