@@ -20,7 +20,9 @@
 **Fast-SQLi** is a lightweight Python tool that probes URL query parameters for SQL injection vulnerabilities using heuristic detection — SQL error signatures, HTTP status changes, and response size anomalies. It supports both single-URL and bulk scanning modes, outputs clean CSV and HTML reports, and is designed to be dead simple to run.
 
 > Built for penetration testers, bug bounty hunters, and developers auditing their own applications.
-![Untitled design (1)](https://github.com/user-attachments/assets/59f17aec-aef5-4ea8-8e2b-6a864751e15d)
+
+<img width="1900" height="836" alt="Screenshot 2026-06-17 020932" src="https://github.com/user-attachments/assets/794c470a-5430-44b1-b250-a62470fd7521" />
+
 ---
 
 ## ✨ Features
